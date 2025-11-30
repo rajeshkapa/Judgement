@@ -43,7 +43,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     useEffect(() => {
         // Connect to server
         // Use relative path in production (same origin), localhost in dev
-        const socketUrl = import.meta.env.PROD ? '/' : 'http://localhost:3000';
+        const socketUrl = import.meta.env.PROD ? '/' : 'https://management-izrn.onrender.com';
         const newSocket = io(socketUrl);
         setSocket(newSocket);
 
