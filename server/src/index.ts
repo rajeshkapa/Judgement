@@ -2,26 +2,34 @@ import express from 'express';
 import http from 'http';
 import { Server, Socket } from 'socket.io';
 import cors from 'cors';
-import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
 import { GameEngine } from './GameEngine';
-import { ClientGameState, ClientPlayer, GameState } from './types';
+import { ClientGameState, ClientPlayer, GameState, LobbyRoom } from './types';
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: '*' }));
 
 const server = http.createServer(app);
 
-// Serve static files from 'public' directory
-app.use(express.static('public'));
+// Serve static files from 'dist' folder (Vite build)
+const distPath = path.join(__dirname, '../dist');
+app.use(express.static(distPath));
+
+// Handle SPA routing - return index.html for all non-API routes
+app.get('*', (req, res, next) => {
+    if (req.url.startsWith('/socket.io/')) return next();
+    res.sendFile(path.join(distPath, 'index.html'));
+});
 
 const io = new Server(server, {
     cors: {
-        origin: "*", // Allow all for now, restrict in prod
+        origin: "*",
         methods: ["GET", "POST"]
-    }
+    },
+    transports: ["websocket", "polling"]
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 // Room management
 const rooms: Map<string, GameEngine> = new Map();
@@ -36,6 +44,7 @@ function getClientState(state: GameState, socketId: string): ClientGameState {
         return {
             id: p.id,
             socketId: p.socketId,
+            sessionId: p.sessionId,
             name: p.name,
             currentBid: p.currentBid,
             tricksWon: p.tricksWon,
@@ -74,17 +83,89 @@ function broadcastUpdate(roomCode: string) {
             io.to(player.socketId).emit('game_update', clientState);
         }
     });
+
+    // Also broadcast lobby update since player count/status might have changed
+    broadcastLobbyUpdate();
 }
+
+function getLobbyRooms(): LobbyRoom[] {
+    const lobbyRooms: LobbyRoom[] = [];
+    rooms.forEach((game, roomId) => {
+        const state = game.getState();
+        // Only show waiting rooms or maybe all? Let's show all for now.
+        // Prompt says: "Room status changes to PLAYING (remove it from the public list or mark as locked)."
+        // We'll mark as PLAYING.
+        lobbyRooms.push({
+            roomId,
+            hostName: state.players[0]?.name || 'Unknown',
+            playerCount: state.players.length,
+            maxPlayers: 4,
+            status: state.phase === 'LOBBY' ? 'WAITING' : 'PLAYING'
+        });
+    });
+    return lobbyRooms;
+}
+
+function broadcastLobbyUpdate() {
+    io.emit('lobby:update', getLobbyRooms());
+}
+
+// Cleanup empty rooms
+setInterval(() => {
+    rooms.forEach((game, roomId) => {
+        const state = game.getState();
+        const connectedCount = state.players.filter(p => p.connected).length;
+
+        // If empty for a while, delete. 
+        // For simplicity, if 0 connected players, delete immediately or after short buffer?
+        // Prompt says: "If a room remains empty (0 players) for more than 1 minute"
+        // We need to track last activity or just check periodically.
+        // Let's just check if 0 connected.
+        if (connectedCount === 0) {
+            // We could add a timestamp to GameEngine to track when it became empty
+            // But for now, let's just delete if empty to keep it simple as per "prevent server bloat"
+            // Or maybe we should wait. Let's assume immediate for now if all disconnected.
+            // Actually, if everyone disconnects, we might want to keep it for a bit for reconnection.
+            // But if it's truly 0 players (never joined or all left), we can kill it.
+            // Let's just log for now.
+            // console.log(`Room ${roomId} is empty.`);
+        }
+    });
+}, 60000);
 
 io.on('connection', (socket: Socket) => {
     console.log('User connected:', socket.id);
+    const sessionId = socket.handshake.auth.sessionID as string;
+
+    // 1. Try to reconnect to existing session
+    let reconnected = false;
+    if (sessionId) {
+        rooms.forEach((game, roomCode) => {
+            if (reconnected) return;
+            if (game.reconnectPlayer(socket.id, sessionId)) {
+                socket.join(roomCode);
+                console.log(`Session ${sessionId} reconnected to room ${roomCode}`);
+                broadcastUpdate(roomCode);
+                reconnected = true;
+            }
+        });
+    }
+
+    if (!reconnected) {
+        // Just a new connection in lobby
+        socket.emit('lobby:update', getLobbyRooms());
+    }
+
+    socket.on('lobby:get_rooms', () => {
+        socket.emit('lobby:update', getLobbyRooms());
+    });
 
     socket.on('create_room', (playerName: string) => {
         const roomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
         const game = new GameEngine(roomCode, () => broadcastUpdate(roomCode));
         rooms.set(roomCode, game);
 
-        game.addPlayer(socket.id, playerName);
+        game.addPlayer(socket.id, sessionId, playerName);
         socket.join(roomCode);
 
         socket.emit('room_created', roomCode);
@@ -103,7 +184,7 @@ io.on('connection', (socket: Socket) => {
             return;
         }
 
-        const player = game.addPlayer(socket.id, playerName);
+        const player = game.addPlayer(socket.id, sessionId, playerName);
         if (!player) {
             socket.emit('error', 'Room is full');
             return;
@@ -111,14 +192,30 @@ io.on('connection', (socket: Socket) => {
 
         socket.join(roomCode);
         broadcastUpdate(roomCode);
+
+        // Auto-start check
+        if (game.getState().players.length === 4) {
+            // Start countdown
+            io.to(roomCode).emit('game_countdown', 5); // 5 seconds
+
+            // We should probably handle this in GameEngine or here.
+            // Let's do a simple timeout here.
+            setTimeout(() => {
+                // Check if still full
+                if (game.getState().players.length === 4) {
+                    game.startGame();
+                    broadcastUpdate(roomCode);
+                } else {
+                    io.to(roomCode).emit('game_countdown_cancelled');
+                }
+            }, 5000);
+        }
     });
 
     socket.on('start_game', (roomCode: string) => {
         const game = rooms.get(roomCode);
         if (!game) return;
 
-        // Only host (first player?) can start? 
-        // For simplicity, anyone in room can start if full.
         if (game.startGame()) {
             broadcastUpdate(roomCode);
         } else {
@@ -169,14 +266,42 @@ io.on('connection', (socket: Socket) => {
                 broadcastUpdate(roomCode);
 
                 // If room empty, delete?
-                const connectedCount = game.getState().players.filter(p => p.connected).length;
-                if (connectedCount === 0) {
-                    rooms.delete(roomCode);
-                }
+                // We'll let the cleanup interval handle it or do it here if we want instant cleanup.
+                // Prompt says "If a room remains empty (0 players) for more than 1 minute".
+                // So we shouldn't delete immediately.
+                // We can tag the room with a "emptySince" timestamp.
+                // For now, let's leave it to the interval (which I need to improve to respect the 1 min rule).
             }
         });
     });
 });
+
+// Improved cleanup with 1 min timeout
+const emptyRooms = new Map<string, number>(); // roomId -> timestamp
+
+setInterval(() => {
+    const now = Date.now();
+    rooms.forEach((game, roomId) => {
+        const state = game.getState();
+        const connectedCount = state.players.filter(p => p.connected).length;
+
+        if (connectedCount === 0) {
+            if (!emptyRooms.has(roomId)) {
+                emptyRooms.set(roomId, now);
+            } else {
+                const emptySince = emptyRooms.get(roomId)!;
+                if (now - emptySince > 60000) {
+                    rooms.delete(roomId);
+                    emptyRooms.delete(roomId);
+                    console.log(`Room ${roomId} deleted due to inactivity.`);
+                    broadcastLobbyUpdate();
+                }
+            }
+        } else {
+            emptyRooms.delete(roomId);
+        }
+    });
+}, 5000); // Check every 5 seconds
 
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);

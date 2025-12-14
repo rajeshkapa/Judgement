@@ -1,13 +1,15 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { GameState } from '../logic/types';
+import { GameState, LobbyRoom } from '../logic/types';
 
 interface GameContextType {
     gameState: GameState | null;
     socket: Socket | null;
     isConnected: boolean;
+    lobbyRooms: LobbyRoom[];
     createRoom: (name: string) => void;
     joinRoom: (roomCode: string, name: string) => void;
+    getLobbyRooms: () => void;
     startGame: () => void;
     placeBid: (bid: number) => void;
     playCard: (cardId: string) => void;
@@ -17,34 +19,39 @@ interface GameContextType {
 
 const GameContext = createContext<GameContextType | undefined>(undefined);
 
-// Default initial state for UI before connection
-const INITIAL_STATE: GameState = {
-    roomId: '',
-    round: 1,
-    dealerIndex: 0,
-    currentPlayerIndex: 0,
-    players: [],
-    currentTrick: [],
-    trumpSuit: 'Hearts',
-    phase: 'LOBBY',
-    leadSuit: null,
-    log: [],
-    chatLog: [],
-    turnDeadline: null,
-    mySeatIndex: -1
-};
-
 export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [socket, setSocket] = useState<Socket | null>(null);
     const [gameState, setGameState] = useState<GameState | null>(null);
+    const [lobbyRooms, setLobbyRooms] = useState<LobbyRoom[]>([]);
     const [isConnected, setIsConnected] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
+        // Session ID logic
+        const params = new URLSearchParams(window.location.search);
+        const debugUser = params.get('user');
+
+        let sessionId = localStorage.getItem('sessionID');
+
+        // If debug user is provided, use it as session ID (or distinct storage key)
+        if (debugUser) {
+            sessionId = `debug_session_${debugUser}`;
+            // We don't save this to the main sessionID key to avoid messing up the main user
+        } else if (!sessionId) {
+            // Fallback for older browsers if crypto.randomUUID is not available
+            if (typeof crypto.randomUUID === 'function') {
+                sessionId = crypto.randomUUID();
+            } else {
+                sessionId = Math.random().toString(36).substring(2) + Date.now().toString(36);
+            }
+            localStorage.setItem('sessionID', sessionId);
+        }
+
         // Connect to server
-        // Use relative path in production (same origin), localhost in dev
         const socketUrl = import.meta.env.PROD ? '/' : 'http://localhost:3000';
-        const newSocket = io(socketUrl);
+        const newSocket = io(socketUrl, {
+            auth: { sessionID: sessionId }
+        });
         setSocket(newSocket);
 
         newSocket.on('connect', () => {
@@ -59,6 +66,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         newSocket.on('game_update', (newState: GameState) => {
             setGameState(newState);
+        });
+
+        newSocket.on('lobby:update', (rooms: LobbyRoom[]) => {
+            setLobbyRooms(rooms);
         });
 
         newSocket.on('error', (msg: string) => {
@@ -80,6 +91,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const joinRoom = (roomCode: string, name: string) => {
         socket?.emit('join_room', { roomCode, playerName: name });
+    };
+
+    const getLobbyRooms = () => {
+        socket?.emit('lobby:get_rooms');
     };
 
     const startGame = () => {
@@ -107,8 +122,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
             gameState,
             socket,
             isConnected,
+            lobbyRooms,
             createRoom,
             joinRoom,
+            getLobbyRooms,
             startGame,
             placeBid,
             playCard,

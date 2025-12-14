@@ -37,12 +37,13 @@ export class GameEngine {
 
     // --- Lobby Management ---
 
-    public addPlayer(socketId: string, name: string): Player | null {
+    public addPlayer(socketId: string, sessionId: string, name: string): Player | null {
         if (this.state.players.length >= 4) return null;
 
         const newPlayer: Player = {
             id: this.state.players.length,
             socketId,
+            sessionId,
             name,
             hand: [],
             currentBid: null,
@@ -64,14 +65,14 @@ export class GameEngine {
         }
     }
 
-    public reconnectPlayer(socketId: string, name: string): boolean {
-        // Simple reconnect logic: find first disconnected player
-        // In a real app, we'd use a session token or similar.
-        // For now, let's just say if name matches? Or just fail if full.
-        // The prompt says "keep their hand valid (allow reconnection)".
-        // We'll need a way to identify them. Let's assume for now they just rejoin and we might map them if we had a persistent ID.
-        // Since we don't have auth, we can't easily reconnect to the *same* seat unless we trust the name or something.
-        // Let's skip complex reconnect for now and just handle disconnect status.
+    public reconnectPlayer(socketId: string, sessionId: string): boolean {
+        const player = this.state.players.find(p => p.sessionId === sessionId);
+        if (player) {
+            player.socketId = socketId;
+            player.connected = true;
+            this.addLog(`${player.name} reconnected.`);
+            return true;
+        }
         return false;
     }
 

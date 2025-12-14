@@ -11,6 +11,7 @@ export interface Card {
 export interface ClientPlayer {
   id: number;
   socketId: string;
+  sessionId?: string;
   name: string;
   cardCount: number;
   hand?: Card[]; // Only present for "me"
@@ -18,6 +19,14 @@ export interface ClientPlayer {
   tricksWon: number;
   totalScore: number;
   connected: boolean;
+}
+
+export interface LobbyRoom {
+  roomId: string;
+  hostName: string;
+  playerCount: number;
+  maxPlayers: number;
+  status: 'WAITING' | 'PLAYING';
 }
 
 export interface PlayedCard {

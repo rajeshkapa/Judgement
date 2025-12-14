@@ -6,7 +6,7 @@ export const Controls: React.FC = () => {
 
     if (!gameState || gameState.mySeatIndex === -1) return null;
 
-    const myPlayer = gameState.players[gameState.mySeatIndex];
+
     const isMyTurn = gameState.currentPlayerIndex === gameState.mySeatIndex;
     const isBidding = gameState.phase === 'BIDDING';
 

@@ -11,12 +11,21 @@ export interface Card {
 export interface Player {
     id: number; // 0-3, seat index
     socketId: string; // Socket.io ID
+    sessionId: string; // Persistent session ID
     name: string;
     hand: Card[];
     currentBid: number | null;
     tricksWon: number;
     totalScore: number;
     connected: boolean;
+}
+
+export interface LobbyRoom {
+    roomId: string;
+    hostName: string;
+    playerCount: number;
+    maxPlayers: number;
+    status: 'WAITING' | 'PLAYING';
 }
 
 export interface PlayedCard {
